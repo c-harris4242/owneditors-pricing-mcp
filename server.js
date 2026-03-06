@@ -1,9 +1,11 @@
 import express from "express";
+import cors from "cors";
 import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/server";
-import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
+import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = parseInt(process.env.PORT ?? "3000", 10);
 const PRICING_API =
   process.env.PRICING_API ||
   "https://owneditors-ai-coach-kss3.vercel.app/api/pricing";
@@ -18,39 +20,19 @@ function createServer() {
     version: "1.0.0",
   });
 
-  server.registerTool(
+  server.tool(
     "get_quote",
+    "Get a live OwnEditors quote using service, level, deadline, and page count.",
     {
-      title: "Get live OwnEditors quote",
-      description:
-        "Get a live quote from OwnEditors pricing using service, academic level, deadline, and page count.",
-      inputSchema: z.object({
-        service: z.string().min(1).describe("Service key, e.g. editing_basic"),
-        level: z
-          .string()
-          .min(1)
-          .describe("Academic level key, e.g. undergrad"),
-        deadline: z
-          .string()
-          .min(1)
-          .describe("Deadline key, e.g. 48h, 24h, 5d"),
-        pages: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe("Number of pages. Defaults to 1 if omitted."),
-      }),
-      outputSchema: z.object({
-        ok: z.boolean(),
-        currency: z.string(),
-        service: z.string(),
-        level: z.string(),
-        deadline: z.string(),
-        unit_price: z.number(),
-        pages: z.number(),
-        total_price: z.number(),
-      }),
+      service: z.string().min(1).describe("Service key, e.g. editing_basic"),
+      level: z.string().min(1).describe("Academic level key, e.g. undergrad"),
+      deadline: z.string().min(1).describe("Deadline key, e.g. 48h or 5d"),
+      pages: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Number of pages. Defaults to 1 if omitted."),
     },
     async ({ service, level, deadline, pages = 1 }) => {
       const url = new URL(PRICING_API);
@@ -60,9 +42,7 @@ function createServer() {
 
       const res = await fetch(url.toString(), {
         method: "GET",
-        headers: {
-          Accept: "application/json",
-        },
+        headers: { Accept: "application/json" },
       });
 
       const data = await res.json().catch(() => null);
@@ -121,48 +101,58 @@ function createServer() {
   return server;
 }
 
-const app = express();
-app.use(express.json({ limit: "1mb" }));
+async function startStreamableHTTPServer() {
+  const app = createMcpExpressApp({ host: "0.0.0.0" });
+  app.use(cors());
+  app.use(express.json());
 
-app.get("/", (_req, res) => {
-  res.json({
-    ok: true,
-    name: "owneditors-pricing-mcp",
-    message: "MCP wrapper is running.",
-    mcp_endpoint: "/mcp",
-    pricing_api: PRICING_API,
+  app.get("/", (_req, res) => {
+    res.json({
+      ok: true,
+      name: "owneditors-pricing-mcp",
+      message: "MCP wrapper is running.",
+      mcp_endpoint: "/mcp",
+      pricing_api: PRICING_API,
+    });
   });
-});
 
-app.post("/mcp", async (req, res) => {
-  try {
+  app.get("/health", (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  app.all("/mcp", async (req, res) => {
     const server = createServer();
-
-    const transport = new NodeStreamableHTTPServerTransport({
+    const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
-      enableJsonResponse: true,
     });
 
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-  } catch (error) {
-    console.error("MCP request failed:", error);
-    res.status(500).json({
-      jsonrpc: "2.0",
-      error: {
-        code: -32000,
-        message: "Internal MCP server error",
-      },
-      id: req.body?.id ?? null,
+    res.on("close", () => {
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
     });
-  }
-});
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
-});
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error("MCP error:", error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
+      }
+    }
+  });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`owneditors-pricing-mcp listening on port ${PORT}`);
-  console.log(`Using pricing API: ${PRICING_API}`);
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`MCP server listening on http://0.0.0.0:${PORT}/mcp`);
+    console.log(`Using pricing API: ${PRICING_API}`);
+  });
+}
+
+startStreamableHTTPServer().catch((e) => {
+  console.error(e);
+  process.exit(1);
 });
