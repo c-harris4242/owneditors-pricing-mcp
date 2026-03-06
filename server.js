@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import { z } from "zod";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
@@ -101,58 +100,45 @@ function createServer() {
   return server;
 }
 
-async function startStreamableHTTPServer() {
-  const app = createMcpExpressApp({ host: "0.0.0.0" });
-  app.use(cors());
-  app.use(express.json());
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-  app.get("/", (_req, res) => {
-    res.json({
-      ok: true,
-      name: "owneditors-pricing-mcp",
-      message: "MCP wrapper is running.",
-      mcp_endpoint: "/mcp",
-      pricing_api: PRICING_API,
-    });
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
+
+async function handleMcp(req, res) {
+  const server = createServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
   });
 
-  app.get("/health", (_req, res) => {
-    res.json({ ok: true });
+  res.on("close", () => {
+    transport.close().catch(() => {});
+    server.close().catch(() => {});
   });
 
-  app.all("/mcp", async (req, res) => {
-    const server = createServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-
-    res.on("close", () => {
-      transport.close().catch(() => {});
-      server.close().catch(() => {});
-    });
-
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (error) {
-      console.error("MCP error:", error);
-      if (!res.headersSent) {
-        res.status(500).json({
-          jsonrpc: "2.0",
-          error: { code: -32603, message: "Internal server error" },
-          id: null,
-        });
-      }
+  try {
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error("MCP error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null,
+      });
     }
-  });
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`MCP server listening on http://0.0.0.0:${PORT}/mcp`);
-    console.log(`Using pricing API: ${PRICING_API}`);
-  });
+  }
 }
 
-startStreamableHTTPServer().catch((e) => {
-  console.error(e);
-  process.exit(1);
+// Expose MCP on BOTH root and /mcp
+app.all("/", handleMcp);
+app.all("/mcp", handleMcp);
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`MCP server listening on http://0.0.0.0:${PORT}`);
+  console.log(`Using pricing API: ${PRICING_API}`);
 });
